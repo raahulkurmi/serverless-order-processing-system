@@ -15,7 +15,7 @@ Complete step-by-step instructions to deploy this project on AWS.
 3. Name: `orders-queue`
 4. Visibility timeout: `30` seconds
 5. Click **Create queue**
-6. Copy the **Queue URL** — you'll need it in Lambda
+6. Copy the **Queue URL** — needed in Lambda code
 
 ---
 
@@ -48,7 +48,7 @@ Complete step-by-step instructions to deploy this project on AWS.
 
 ---
 
-## Step 5 — Create Lambda Function
+## Step 5 — Create order-processor Lambda
 
 1. AWS Console → Lambda → Create function
 2. Author from scratch
@@ -59,23 +59,42 @@ Complete step-by-step instructions to deploy this project on AWS.
 7. Replace `YOUR_ACCOUNT_ID` in `QUEUE_URL` with your actual AWS account ID
 8. Click **Deploy**
 
----
-
-## Step 6 — Attach IAM Permissions to Lambda
-
-1. Lambda → Configuration → Permissions → click the role name
-2. Add permissions → Attach policies:
-   - `AWSLambdaSQSQueueExecutionRole`
-   - `AmazonSQSFullAccess`
-   - `AmazonDynamoDBFullAccess`
+Attach these policies to its IAM role:
+- `AWSLambdaSQSQueueExecutionRole`
+- `AmazonSQSFullAccess`
+- `AmazonDynamoDBFullAccess`
 
 ---
 
-## Step 7 — Connect SQS to Lambda
+## Step 6 — Create dlq-handler Lambda
 
-1. Lambda → Configuration → Triggers → Add trigger
+1. AWS Console → Lambda → Create function
+2. Author from scratch
+3. Name: `dlq-handler`
+4. Runtime: Python 3.12
+5. Create function
+6. Paste code from `lambda/dlq_handler.py`
+7. Click **Deploy**
+
+Attach these policies to its IAM role:
+- `AWSLambdaSQSQueueExecutionRole`
+- `AmazonDynamoDBFullAccess`
+
+---
+
+## Step 7 — Connect SQS Triggers
+
+**Connect orders-queue to order-processor:**
+1. Lambda → `order-processor` → Configuration → Triggers → Add trigger
 2. Source: SQS
 3. Queue: `orders-queue`
+4. Batch size: `10`
+5. Click **Add**
+
+**Connect orders-dlq to dlq-handler:**
+1. Lambda → `dlq-handler` → Configuration → Triggers → Add trigger
+2. Source: SQS
+3. Queue: `orders-dlq`
 4. Batch size: `10`
 5. Click **Add**
 
@@ -124,7 +143,7 @@ Complete step-by-step instructions to deploy this project on AWS.
 6. Go to POST method → Method request → Edit → API key required: `true`
 7. Do the same for GET method
 8. Redeploy API → `prod`
-9. Copy the **API key value** from API keys page
+9. Copy the **API key value**
 
 ---
 

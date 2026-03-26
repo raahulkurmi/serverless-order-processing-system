@@ -12,6 +12,17 @@ x-api-key: YOUR_API_KEY
 
 ---
 
+## Order Status Values
+
+| Status | Meaning |
+|---|---|
+| `pending` | Order received, saved to DB, waiting in SQS queue |
+| `processing` | Lambda picked it up, currently being processed |
+| `processed` | Successfully completed and saved |
+| `failed` | Failed 3 times, moved to DLQ, marked as failed |
+
+---
+
 ## POST /orders
 
 Place a new order.
@@ -78,7 +89,6 @@ GET /orders/301
   "qty": 2,
   "user_id": "user_123",
   "status": "processed",
-  "message_id": "abc123-...",
   "created_at": "2026-03-26T09:39:12.666031+00:00"
 }
 ```
@@ -115,12 +125,20 @@ curl https://YOUR_API_ID.execute-api.us-east-1.amazonaws.com/prod/orders/301 \
   -H "x-api-key: YOUR_API_KEY"
 ```
 
-**Test validation:**
+**Test validation — missing fields:**
 ```bash
 curl -X POST https://YOUR_API_ID.execute-api.us-east-1.amazonaws.com/prod/orders \
   -H "Content-Type: application/json" \
   -H "x-api-key: YOUR_API_KEY" \
   -d '{"random": "garbage"}'
+```
+
+**Test validation — negative qty:**
+```bash
+curl -X POST https://YOUR_API_ID.execute-api.us-east-1.amazonaws.com/prod/orders \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: YOUR_API_KEY" \
+  -d '{"order_id": "302", "item": "shoes", "qty": -1, "user_id": "user_123"}'
 ```
 
 **Test without API key:**

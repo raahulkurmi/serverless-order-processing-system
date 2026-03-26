@@ -11,12 +11,23 @@ A production-grade serverless backend built on AWS — API Gateway, SQS, Lambda,
 ```
 Client
   → API Gateway (auth + routing)
-  → Lambda (input validation)
-  → SQS (message queue)
-  → Lambda (order processor)
-  → DynamoDB (persistence)
+  → Lambda (validates → saves as pending → sends to SQS)
+  → SQS (Lambda picks up → updates to processing)
+  → Lambda (processes → updates to processed)
+  → DynamoDB
         ↓
-  orders-dlq (failed messages after 3 retries)
+  orders-dlq → dlq-handler Lambda (updates to failed)
+```
+
+---
+
+## Order Status Lifecycle
+
+```
+pending     → order received, saved to DB, sitting in queue
+processing  → Lambda picked it up, currently being processed
+processed   → successfully completed, saved to DynamoDB
+failed      → failed 3 times, moved to DLQ, marked as failed
 ```
 
 ---
@@ -26,9 +37,11 @@ Client
 | Service | Role |
 |---|---|
 | API Gateway | REST API — receives HTTP requests, enforces API key auth |
-| Lambda (Python 3.12) | Validates orders + processes SQS messages |
-| SQS | Decouples API from processing, buffers messages |
-| DynamoDB | Persists processed orders |
+| Lambda — order-processor | Validates orders + processes SQS messages |
+| Lambda — dlq-handler | Marks failed orders in DynamoDB |
+| SQS — orders-queue | Decouples API from processing, buffers messages |
+| SQS — orders-dlq | Catches messages that fail 3 times |
+| DynamoDB | Persists all orders with real-time status |
 | IAM | Permissions between all services |
 
 ---
@@ -36,10 +49,12 @@ Client
 ## Features
 
 - Async order processing via SQS message queue
+- Order status lifecycle: `pending → processing → processed → failed`
 - Input validation — rejects bad requests before they touch the queue
 - Idempotency — safe to retry, no duplicate orders saved
 - Dead Letter Queue — failed messages parked after 3 retries
-- GET endpoint — retrieve any order by ID
+- DLQ handler Lambda — explicitly marks failed orders in DynamoDB
+- GET endpoint — retrieve any order by ID with real-time status
 - API key authentication
 - CORS enabled — works with browser frontend
 - Batch processing — up to 10 messages per Lambda invocation
@@ -53,17 +68,20 @@ Client
 serverless-order-processing/
 │
 ├── README.md
+├── .gitignore
+├── .env.example
 ├── architecture.png
 │
 ├── lambda/
-│   └── lambda_function.py        ← single Lambda handles all logic
+│   ├── lambda_function.py      ← main Lambda — validates + processes orders
+│   └── dlq_handler.py          ← DLQ Lambda — marks failed orders
 │
 ├── frontend/
-│   └── index.html                ← plain HTML frontend
+│   └── index.html              ← plain HTML frontend
 │
 └── docs/
-    ├── setup.md                  ← manual AWS console setup steps
-    └── api.md                    ← API reference
+    ├── setup.md                ← manual AWS console setup steps
+    └── api.md                  ← API reference
 ```
 
 ---
@@ -127,6 +145,12 @@ x-api-key: YOUR_API_KEY
 }
 ```
 
+Status values:
+- `pending` — order received, waiting in queue
+- `processing` — Lambda picked it up
+- `processed` — successfully completed
+- `failed` — failed 3 times, moved to DLQ
+
 **Response 404 — not found:**
 ```json
 {
@@ -163,7 +187,7 @@ x-api-key: YOUR_API_KEY
 
 ---
 
-### Step 3 — Attach DLQ to main queue
+### Step 3 — Attach DLQ to Main Queue
 
 1. SQS → `orders-queue` → Edit
 2. Scroll to **Dead-letter queue** → Enable
@@ -182,40 +206,59 @@ x-api-key: YOUR_API_KEY
 
 ---
 
-### Step 5 — Create Lambda Function
+### Step 5 — Create order-processor Lambda
 
 1. AWS Console → Lambda → Create function
-2. Author from scratch
-3. Name: `order-processor`
-4. Runtime: Python 3.12
-5. Create function
-6. Paste code from `lambda/lambda_function.py`
-7. Update `QUEUE_URL` with your actual SQS queue URL
-8. Click **Deploy**
+2. Name: `order-processor`
+3. Runtime: Python 3.12
+4. Paste code from `lambda/lambda_function.py`
+5. Replace `YOUR_ACCOUNT_ID` in `QUEUE_URL`
+6. Click **Deploy**
+
+Attach these policies to its IAM role:
+- `AWSLambdaSQSQueueExecutionRole`
+- `AmazonSQSFullAccess`
+- `AmazonDynamoDBFullAccess`
 
 ---
 
-### Step 6 — Attach IAM Permissions to Lambda
+### Step 6 — Create dlq-handler Lambda
 
-1. Lambda → Configuration → Permissions → click role name
-2. Add permissions → Attach policies:
-   - `AWSLambdaSQSQueueExecutionRole`
-   - `AmazonSQSFullAccess`
-   - `AmazonDynamoDBFullAccess`
+1. AWS Console → Lambda → Create function
+2. Name: `dlq-handler`
+3. Runtime: Python 3.12
+4. Paste code from `lambda/dlq_handler.py`
+5. Click **Deploy**
 
----
-
-### Step 7 — Connect SQS to Lambda
-
-1. Lambda → Configuration → Triggers → Add trigger
-2. Source: SQS
-3. Queue: `orders-queue`
-4. Batch size: `10`
-5. Click **Add**
+Attach these policies to its IAM role:
+- `AWSLambdaSQSQueueExecutionRole`
+- `AmazonDynamoDBFullAccess`
 
 ---
 
-### Step 8 — Create API Gateway
+### Step 7 — Connect SQS Triggers
+
+**order-processor:**
+1. Lambda → `order-processor` → Configuration → Triggers → Add trigger
+2. Source: SQS, Queue: `orders-queue`, Batch size: `10` → Add
+
+**dlq-handler:**
+1. Lambda → `dlq-handler` → Configuration → Triggers → Add trigger
+2. Source: SQS, Queue: `orders-dlq`, Batch size: `10` → Add
+
+---
+
+### Step 8 — Create IAM Role for API Gateway
+
+1. IAM → Roles → Create role
+2. Trusted entity: API Gateway
+3. Name: `apigateway-sqs-role`
+4. Attach policy: `AmazonSQSFullAccess`
+5. Copy the Role ARN
+
+---
+
+### Step 9 — Create API Gateway
 
 1. AWS Console → API Gateway → Create API → REST API
 2. Name: `orders-api`
@@ -229,18 +272,10 @@ x-api-key: YOUR_API_KEY
    - Integration type: Lambda function
    - Enable Lambda proxy integration
    - Select `order-processor`
-7. Enable CORS on both `/orders` and `/{order_id}`
-8. Deploy API → stage name: `prod`
-
----
-
-### Step 9 — Create IAM Role for API Gateway
-
-1. IAM → Roles → Create role
-2. Trusted entity: API Gateway
-3. Name: `apigateway-sqs-role`
-4. Attach policy: `AmazonSQSFullAccess`
-5. Copy the role ARN
+7. Enable CORS on `/orders` — check POST
+8. Enable CORS on `/{order_id}` — check GET
+9. Deploy API → stage name: `prod`
+10. Copy the Invoke URL
 
 ---
 
@@ -250,19 +285,21 @@ x-api-key: YOUR_API_KEY
 2. Name: `orders-api-key` → Save
 3. API Gateway → Usage plans → Create
    - Name: `orders-plan`
-   - Rate: 100/sec, Burst: 200, Quota: 10,000/month
+   - Rate: `100` req/sec, Burst: `200`, Quota: `10000`/month
 4. Add API stage: `orders-api` → `prod`
 5. Add API key: `orders-api-key`
 6. Set API key required: `true` on POST and GET methods
 7. Redeploy API → `prod`
+8. Copy the API key value
 
 ---
 
 ### Step 11 — Run the Frontend
 
 1. Open `frontend/index.html`
-2. Update `API_URL` and `API_KEY` with your values
-3. Open in browser — done
+2. Replace `YOUR_API_URL` with your Invoke URL
+3. Replace `YOUR_API_KEY` with your API key value
+4. Open in browser
 
 ---
 
@@ -282,7 +319,7 @@ curl https://YOUR_API_ID.execute-api.us-east-1.amazonaws.com/prod/orders/301 \
   -H "x-api-key: YOUR_API_KEY"
 ```
 
-**Test validation — missing fields:**
+**Test validation:**
 ```bash
 curl -X POST https://YOUR_API_ID.execute-api.us-east-1.amazonaws.com/prod/orders \
   -H "Content-Type: application/json" \
@@ -290,40 +327,34 @@ curl -X POST https://YOUR_API_ID.execute-api.us-east-1.amazonaws.com/prod/orders
   -d '{"random": "garbage"}'
 ```
 
-**Test validation — negative qty:**
-```bash
-curl -X POST https://YOUR_API_ID.execute-api.us-east-1.amazonaws.com/prod/orders \
-  -H "Content-Type: application/json" \
-  -H "x-api-key: YOUR_API_KEY" \
-  -d '{"order_id": "302", "item": "shoes", "qty": -1, "user_id": "user_123"}'
-```
-
 **Test without API key:**
 ```bash
 curl https://YOUR_API_ID.execute-api.us-east-1.amazonaws.com/prod/orders/301
-# Expected: {"message":"Forbidden"}
 ```
 
 ---
 
 ## Key Concepts
 
+**Order status lifecycle** — orders are saved immediately as `pending` so the frontend always has visibility. Status updates to `processing` when Lambda picks up, `processed` on success, `failed` if it hits the DLQ.
+
 **Visibility timeout** — each Lambda retry gets a full fresh window. Three failures → message moves to DLQ.
 
 **Idempotency** — before saving an order, Lambda checks if it already exists in DynamoDB. Duplicate messages are skipped safely.
 
-**Dead Letter Queue** — messages that fail 3 times are moved to `orders-dlq` for manual inspection instead of retrying forever.
+**Dead Letter Queue** — messages that fail 3 times move to `orders-dlq`. The `dlq-handler` Lambda explicitly marks them as `failed` in DynamoDB.
 
 **Batch processing** — one Lambda invocation handles up to 10 messages. Fewer cold starts, cheaper, less database pressure.
 
 **Decoupling** — API and processing are fully independent. The API returns success instantly. Processing happens asynchronously.
+
+**SQS vs Kafka** — SQS is a task queue: messages consumed and deleted. Kafka is an event log: messages stored, multiple consumers can read independently.
 
 ---
 
 ## Future Improvements
 
 - [ ] SNS notifications on order completion
-- [ ] Order status lifecycle: `pending → processing → completed`
 - [ ] CloudWatch alarms when DLQ receives messages
 - [ ] AWS Cognito for real user authentication
 - [ ] Terraform / CDK for infrastructure as code

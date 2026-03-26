@@ -2,7 +2,8 @@
 
 A production-grade serverless backend built on AWS — API Gateway, SQS, Lambda, and DynamoDB.
 
-![Architecture](architecture.png)
+<img width="709" height="439" alt="Screenshot 2026-03-26 at 11 49 29 PM" src="https://github.com/user-attachments/assets/99bde2b3-e769-4e24-8a94-d568afe0c13a" />
+
 
 ---
 

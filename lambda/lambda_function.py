@@ -85,7 +85,17 @@ def post_order(body):
         MessageBody=json.dumps(body)
     )
 
-    logger.info(f"Order {body['order_id']} sent to SQS")
+    # ── Save immediately to DynamoDB with pending status ───────────
+    table.put_item(Item={
+        'order_id':   body['order_id'],
+        'item':       body['item'],
+        'qty':        body['qty'],
+        'user_id':    body['user_id'],
+        'status':     'pending',
+        'created_at': datetime.now(timezone.utc).isoformat()
+    })
+
+    logger.info(f"Order {body['order_id']} saved as pending, sent to SQS")
     return {
         'statusCode': 202,
         'headers': CORS_HEADERS,
@@ -124,24 +134,34 @@ def handle_sqs_messages(event):
         message_id = record['messageId']
         order_id   = body.get('order_id', 'unknown')
 
+        # Update status to processing immediately
+        table.update_item(
+            Key={'order_id': order_id},
+            UpdateExpression='SET #s = :s',
+            ExpressionAttributeNames={'#s': 'status'},
+            ExpressionAttributeValues={':s': 'processing'}
+        )
+
+        logger.info(f"Order #{order_id} status updated to processing")
+
         # Idempotency check — skip if already processed
         existing = table.get_item(Key={'order_id': order_id})
         if 'Item' in existing:
             logger.info(f"Order #{order_id} already processed — skipping")
             continue
 
-        # Save to DynamoDB
-        table.put_item(Item={
-            'order_id':   order_id,
-            'item':       body.get('item', 'unknown'),
-            'qty':        body.get('qty', 0),
-            'user_id':    body.get('user_id', 'unknown'),
-            'status':     'processed',
-            'message_id': message_id,
-            'created_at': datetime.now(timezone.utc).isoformat()
-        })
+        # Update status to processed in DynamoDB
+        table.update_item(
+            Key={'order_id': order_id},
+            UpdateExpression='SET #s = :s, message_id = :m',
+            ExpressionAttributeNames={'#s': 'status'},
+            ExpressionAttributeValues={
+                ':s': 'processed',
+                ':m': message_id
+            }
+        )
 
-        logger.info(f"Order #{order_id} saved successfully")
+        logger.info(f"Order #{order_id} updated to processed")
 
     return {
         'statusCode': 200,
